@@ -1,90 +1,73 @@
-{ lib
-, stdenv
-, callPackage
-, fetchurl
-, makeWrapper
-, writeScriptBin
-, runCommand
-, coreutils
-, libarchive
-, nodejs
-, python3
-, xcbuild
-, nix
-, yarn
-, node-gyp ? null
+{ lib, stdenv, callPackage, fetchurl, makeWrapper, writeScriptBin, runCommand
+, coreutils, libarchive, nodejs, python3, xcbuild, nix, yarn, node-gyp ? null
 }@_args:
 
 let
-  stub-node-gyp = msg: writeScriptBin "node-gyp" ''
-    >&2 echo
-    >&2 echo "  ERROR: ${msg}"
-    >&2 echo
-    exit 1
-  '';
+  stub-node-gyp = msg:
+    writeScriptBin "node-gyp" ''
+      >&2 echo
+      >&2 echo "  ERROR: ${msg}"
+      >&2 echo
+      exit 1
+    '';
 
   # We build node-gyp package here if it's not provided by using the version of js2nix 
   # that isn't bound to node-gyp as a dependency.
   #
-  node-gyp = _args.node-gyp or (
-    let
-      buildNodeModule = createBuildNodeModule [
+  node-gyp = _args.node-gyp or (let
+    buildNodeModule = createBuildNodeModule [
 
-        # Prevent building node-gyp package using node-gyp itself.
-        # This shouldn't happen, it's just a generic guard.
-        #
-        (stub-node-gyp "Unable to build the node-gyp package with node-gyp itself: infinite recursion encountered.")
-      ];
-      tree = createLoadNixExpression buildNodeModule ./yarn.lock.nix { };
-
-      # node-gyp is added as optionalDependency on the package.json file to explicitly separate it from 
-      # dependencies but still have it managed by mechanisms from Yarn package manager, i.e. modify yarn.lock 
-      # file to reflect all of node-gyp's dependencies.
+      # Prevent building node-gyp package using node-gyp itself.
+      # This shouldn't happen, it's just a generic guard.
       #
-      node-gyp-ref = "node-gyp@${(lib.importJSON ./package.json).optionalDependencies.node-gyp}";
-    in
-    tree.${node-gyp-ref}.overrideAttrs (prev: {
-      nativeBuildInputs = prev.nativeBuildInputs ++ [ makeWrapper python3 ];
-      postInstall = ''
-        patchShebangs $out/lib/gyp
-        wrapProgram $out/bin/node-gyp \
-          --set npm_config_nodedir ${nodejs} \
-          --set npm_config_python "${python3}/bin/python"
-      '';
-    })
-  );
+      (stub-node-gyp
+        "Unable to build the node-gyp package with node-gyp itself: infinite recursion encountered.")
+    ];
+    tree = createLoadNixExpression buildNodeModule ./yarn.lock.nix { };
 
-  proxy = runCommand "js2nix-proxy"
-    {
-      nativeBuildInputs = [ makeWrapper ];
-    } ''
+    # node-gyp is added as optionalDependency on the package.json file to explicitly separate it from 
+    # dependencies but still have it managed by mechanisms from Yarn package manager, i.e. modify yarn.lock 
+    # file to reflect all of node-gyp's dependencies.
+    #
+    node-gyp-ref = "node-gyp@${
+        (lib.importJSON ./package.json).optionalDependencies.node-gyp
+      }";
+  in tree.${node-gyp-ref}.overrideAttrs (prev: {
+    nativeBuildInputs = prev.nativeBuildInputs ++ [ makeWrapper python3 ];
+    postInstall = ''
+      patchShebangs $out/lib/gyp
+      wrapProgram $out/bin/node-gyp \
+        --set npm_config_nodedir ${nodejs} \
+        --set npm_config_python "${python3}/bin/python"
+    '';
+  }));
+
+  proxy = runCommand "js2nix-proxy" { nativeBuildInputs = [ makeWrapper ]; } ''
     mkdir -p $out/bin
     makeWrapper ${bin}/lib/lib/proxy.js $out/bin/yarn
   '';
 
   # Links given list of node modules derivations into $out directory.
   #
-  linkNodeModules = lib.makeOverridable (
-    { name ? ""
-    , modules
+  linkNodeModules = lib.makeOverridable ({ name ? "", modules
 
-      # Prefix is peing used to place the resulting dependencies in the resulting derivation output.
-      # By default it's a root derivation output folder, however, for some casees it can be useful to
-      # provide this prefix. For instance, in case it's required to provide dependency artifact
-      # hooked into $NODE_PATH instead of realpath or symlinked folder, as traditional package 
-      # managers do. 
-      # For example, if it follows the `/lib/node_modules` folder structure that can be picked up by 
-      # nodejs setup-hook, see # https://github.com/NixOS/nixpkgs/blob/564f9b1da/pkgs/development/web/nodejs/setup-hook.sh#L2
-      #
-      #    devNodeModules = js2nix.makeNodeModules ./package.json {
-      #      name = "dev";
-      #      inherit tree;
-      #      prefix = "/lib/node_modules";
-      #      exposeBin = true;
-      #    };
-      #
-      # So the /nix/store/23c0002ycx2b0gm69wh0nnka9fbl949l-dev-node-modules/lib/node_modules will be added
-      # into $NODE_PATH env var. See the `./README.md` file for more details.
+    # Prefix is peing used to place the resulting dependencies in the resulting derivation output.
+    # By default it's a root derivation output folder, however, for some casees it can be useful to
+    # provide this prefix. For instance, in case it's required to provide dependency artifact
+    # hooked into $NODE_PATH instead of realpath or symlinked folder, as traditional package 
+    # managers do. 
+    # For example, if it follows the `/lib/node_modules` folder structure that can be picked up by 
+    # nodejs setup-hook, see # https://github.com/NixOS/nixpkgs/blob/564f9b1da/pkgs/development/web/nodejs/setup-hook.sh#L2
+    #
+    #    devNodeModules = js2nix.makeNodeModules ./package.json {
+    #      name = "dev";
+    #      inherit tree;
+    #      prefix = "/lib/node_modules";
+    #      exposeBin = true;
+    #    };
+    #
+    # So the /nix/store/23c0002ycx2b0gm69wh0nnka9fbl949l-dev-node-modules/lib/node_modules will be added
+    # into $NODE_PATH env var. See the `./README.md` file for more details.
 
     , prefix ? ""
       # By default, there will be a `$out/.bin` directory if binaries are provided by
@@ -119,15 +102,14 @@ let
       #
       # Defaults to `false`.
       #
-    , exposeBin ? false
-    }:
+    , exposeBin ? false }:
     let
       commandName =
         if name != "" then "${name}-node-modules" else "node-modules";
-      nm = runCommand commandName
-        {
-          passthru.modules = builtins.fold' (acc: m: acc // { ${m.moduleName} = m; }) { } modules;
-        } ''
+      nm = runCommand commandName {
+        passthru.modules =
+          builtins.fold' (acc: m: acc // { ${m.moduleName} = m; }) { } modules;
+      } ''
         mkdir -p $out${prefix}
         pushd $out${prefix} >/dev/null
         ${createLinkNodeModulesScript name modules}
@@ -137,11 +119,10 @@ let
           if [[ -d $out${prefix}/.bin ]]; then
             ln -sT $out${prefix}/.bin $out/bin
           fi
-        '' else ""}
+        '' else
+          ""}
       '';
-    in
-    nm
-  );
+    in nm);
 
   # This script is run in the node_modules folder and creates symlinks to the given modules and
   # symlinks their binaries in the ./.bin folder. A private function for internal use.
@@ -184,71 +165,64 @@ let
   # build that build dependency and then instantiate itself with node-gyp in the nativeBuildInputs
   # already.
   #
-  createBuildNodeModule = extraNativeBuildInputs: lib.makeOverridable ({ host ? null
-                                                                       , id
-                                                                       , version
-                                                                       , src
-                                                                       , modules ? [ ]
-                                                                       , lifeCycleScripts ? [ "install" "postinstall" ]
-                                                                       , doCheck ? true
-                                                                       , ...
-                                                                       }@args:
-    let
-      hasHost = builtins.typeOf host == "set";
-      pname = if id.scope == "" then id.name else "${id.scope}-${id.name}";
-      moduleName = if id.scope == "" then id.name else "@${id.scope}/${id.name}";
-      ref = "${moduleName}@${version}";
-    in
-    stdenv.mkDerivation ({
-      inherit pname version src;
-      passthru = { inherit id modules host hasHost moduleName ref; };
+  createBuildNodeModule = extraNativeBuildInputs:
+    lib.makeOverridable ({ host ? null, id, version, src, modules ? [ ]
+      , lifeCycleScripts ? [ "install" "postinstall" ], doCheck ? true, ...
+      }@args:
+      let
+        hasHost = builtins.typeOf host == "set";
+        pname = if id.scope == "" then id.name else "${id.scope}-${id.name}";
+        moduleName =
+          if id.scope == "" then id.name else "@${id.scope}/${id.name}";
+        ref = "${moduleName}@${version}";
+      in stdenv.mkDerivation ({
+        inherit pname version src;
+        passthru = { inherit id modules host hasHost moduleName ref; };
 
-      # 'gnutar' doesn't correctly extract archives with files owned by root without
-      # the executable bit. You can reproduce the issue by:
-      #
-      #   src = fetchurl {
-      #     url = "https://registry.yarnpkg.com/pngjs/-/pngjs-5.0.0.tgz";
-      #     sha1 = "e79dd2b215767fd9c04561c01236df960bce7fbb";
-      #   }
-      #
-      # Whereas 'libarchive' is able to extract such archives so this is why this 
-      # override exists.
-      #
-      unpackCmd = "if test -f $curSrc; then bsdtar xf $curSrc; else false; fi";
+        # 'gnutar' doesn't correctly extract archives with files owned by root without
+        # the executable bit. You can reproduce the issue by:
+        #
+        #   src = fetchurl {
+        #     url = "https://registry.yarnpkg.com/pngjs/-/pngjs-5.0.0.tgz";
+        #     sha1 = "e79dd2b215767fd9c04561c01236df960bce7fbb";
+        #   }
+        #
+        # Whereas 'libarchive' is able to extract such archives so this is why this 
+        # override exists.
+        #
+        unpackCmd =
+          "if test -f $curSrc; then bsdtar xf $curSrc; else false; fi";
 
-      nativeBuildInputs =
-        [ nodejs libarchive ]
-          ++ extraNativeBuildInputs
+        nativeBuildInputs = [ nodejs libarchive ] ++ extraNativeBuildInputs
           ++ lib.optionals stdenv.isDarwin [ xcbuild ];
-      buildInputs = [ nodejs ];
+        buildInputs = [ nodejs ];
 
-      dontConfigure = true;
-      dontBuild = true;
+        dontConfigure = true;
+        dontBuild = true;
 
-      # Workaround 'permission denied' error for poorly packed archives.
-      # See https://discourse.nixos.org/t/unpack-phase-permission-denied/13382/4
-      # and https://github.com/Profpatsch/yarn2nix/issues/56#issuecomment-804825097
-      #
-      dontMakeSourcesWritable = true;
-      postUnpack = ''
-        # Need to make it generic because some of the packages are packed in different way.
-        chmod -R +x "$sourceRoot"
-      '';
-    } // (if hasHost then {
+        # Workaround 'permission denied' error for poorly packed archives.
+        # See https://discourse.nixos.org/t/unpack-phase-permission-denied/13382/4
+        # and https://github.com/Profpatsch/yarn2nix/issues/56#issuecomment-804825097
+        #
+        dontMakeSourcesWritable = true;
+        postUnpack = ''
+          # Need to make it generic because some of the packages are packed in different way.
+          chmod -R +x "$sourceRoot"
+        '';
+      } // (if hasHost then {
 
-      # Providing the sources only because the package is going to be hosted, thus for the
-      # host it's just a source of a guest package, but not a properly installed one, that
-      # would be directly used in a particular node_modules artifact.
-      #
-      installPhase = ''
-        runHook preInstall
-        mkdir -p $out/lib
-        cp -r . $out/lib
-        runHook postInstall 
-      '';
-    } else {
-      installPhase =
-        let
+        # Providing the sources only because the package is going to be hosted, thus for the
+        # host it's just a source of a guest package, but not a properly installed one, that
+        # would be directly used in a particular node_modules artifact.
+        #
+        installPhase = ''
+          runHook preInstall
+          mkdir -p $out/lib
+          cp -r . $out/lib
+          runHook postInstall 
+        '';
+      } else {
+        installPhase = let
 
           # Creates a JS valid name for the module.
           # For example:
@@ -284,7 +258,9 @@ let
                   '' else if seen then ''
                     Promise.resolve()
                   '' else ''
-                    hosted['${ makeJSVarName module.id }'] || (hosted['${ makeJSVarName module.id }'] = (async () => {
+                    hosted['${makeJSVarName module.id}'] || (hosted['${
+                      makeJSVarName module.id
+                    }'] = (async () => {
                       const nodeModules = path.join(
                         process.env.out, 
                         'pkgs',
@@ -298,12 +274,14 @@ let
                       await lib.linkModule(pkg, ${destination})
 
                       // Host / Link modules
-                      const ${ makeJSVarName module.id }TargetNodeModules = nodeModules;
+                      const ${
+                        makeJSVarName module.id
+                      }TargetNodeModules = nodeModules;
                       return ${
                         ensureDependencies {
                           modules = module.modules;
                           destination =
-                            "${ makeJSVarName module.id }TargetNodeModules";
+                            "${makeJSVarName module.id}TargetNodeModules";
                           visited = builtins.concatLists [
                             visited
                             [{ inherit (module) id host; }]
@@ -328,7 +306,7 @@ let
             const hosted = {};
 
             async function main() {
-              console.error('Executing Node.js install script for ' + process.env.moduleName + ' ...');
+              console.error('Executing Node.js new install script for ' + process.env.moduleName + ' ...');
               const nodeModules = path.join(
                 process.env.out, 
                 'pkgs',
@@ -353,8 +331,7 @@ let
               process.exit(1);
             });
           '';
-        in
-        ''
+        in ''
           runHook preInstall
 
           # It's a relatively complicated beast with recursive calls and
@@ -369,67 +346,68 @@ let
           runHook postInstall
         '';
 
-      postInstall = ''
-        # Handle life-cycle scripts
-        pushd "$out/lib" >/dev/null
-        ${lib.concatMapStringsSep "\n" (script: ''
-          script="$(node -e 'process.stdout.write(((require("./package.json") || {}).scripts || {}).${script} || "")')"
+        postInstall = ''
+          # Handle life-cycle scripts
+          pushd "$out/lib" >/dev/null
+          ${lib.concatMapStringsSep "\n" (script: ''
+            script="$(node -e 'process.stdout.write(((require("./package.json") || {}).scripts || {}).${script} || "")')"
 
-          if [[ "${script}" == "install" ]] && [[ -z "$script" ]] && [[ -f ./binding.gyp ]]; then
-            script="node-gyp rebuild"
+            if [[ "${script}" == "install" ]] && [[ -z "$script" ]] && [[ -f ./binding.gyp ]]; then
+              script="node-gyp rebuild"
+            fi
+
+            if [[ -n "$script" ]]; then
+              echo "${moduleName}: invoke \"${script}\" life-cycle script:"
+              echo
+              echo "( cd \"$out/lib\" && env \"HOME=$TMPDIR\" \"PATH=$out/pkgs/${ref}/node_modules/.bin:$PATH\" bash -c \"$(echo $script | sed 's/"/\\"/g')\" )"
+              echo
+              env "HOME=$TMPDIR" "PATH=$out/pkgs/${ref}/node_modules/.bin:$PATH" bash -c "$script"
+            fi
+          '') lifeCycleScripts}
+
+          popd >/dev/null
+        '';
+
+        phases = [
+          "unpackPhase"
+          "patchPhase"
+          "installPhase"
+          "fixupPhase"
+          "checkPhase"
+        ];
+
+        doCheck = !hasHost && doCheck;
+        checkPhase = ''
+          has_main="$(node -e 'process.stdout.write(String(!!require(process.env.out + "/lib/package.json").main))')"
+          if [[ $has_main == "true" ]] || [[ -f $out/lib/index.js ]]; then
+            echo "Checking import of the ${moduleName} ..."
+            node -e 'require(process.env.out + "/lib")' || (
+              echo
+              echo Unable to execute:
+              echo "node -e 'require(\"$out/lib\")"
+              echo "Import check for the \"${moduleName}\" failed. Consider disable a check for this module in an overlay or fix the error."
+              echo
+              exit 1
+            )
           fi
+        '';
 
-          if [[ -n "$script" ]]; then
-            echo "${moduleName}: invoke \"${script}\" life-cycle script:"
-            echo
-            echo "( cd \"$out/lib\" && env \"HOME=$TMPDIR\" \"PATH=$out/pkgs/${ref}/node_modules/.bin:$PATH\" bash -c \"$(echo $script | sed 's/"/\\"/g')\" )"
-            echo
-            env "HOME=$TMPDIR" "PATH=$out/pkgs/${ref}/node_modules/.bin:$PATH" bash -c "$script"
-          fi
-        '') lifeCycleScripts}
-
-        popd >/dev/null
-      '';
-  
-      phases = [
-        "unpackPhase"
-        "patchPhase"
-        "installPhase"
-        "fixupPhase"
-        "checkPhase"
-      ];
-
-      doCheck = !hasHost && doCheck;
-      checkPhase = ''
-        has_main="$(node -e 'process.stdout.write(String(!!require(process.env.out + "/lib/package.json").main))')"
-        if [[ $has_main == "true" ]] || [[ -f $out/lib/index.js ]]; then
-          echo "Checking import of the ${moduleName} ..."
-          node -e 'require(process.env.out + "/lib")' || (
-            echo
-            echo Unable to execute:
-            echo "node -e 'require(\"$out/lib\")"
-            echo "Import check for the \"${moduleName}\" failed. Consider disable a check for this module in an overlay or fix the error."
-            echo
-            exit 1
-          )
-        fi
-      '';
-
-    }) // removeAttrs args [ "id" "host" "modules" "passthru" "doCheck" ]));
+      }) // removeAttrs args [ "id" "host" "modules" "passthru" "doCheck" ]));
 
   # Load generated Nix expression, injects dependencies and returns an extensible attribute set.
   # Same as `makeNixExpression`, is there any use to calling this directly instead of using `load`?
   #
-  loadNixExpression = createLoadNixExpression (createBuildNodeModule [ node-gyp ]);
-  createLoadNixExpression = fn: m: { overlays ? [ ] }:
+  loadNixExpression =
+    createLoadNixExpression (createBuildNodeModule [ node-gyp ]);
+  createLoadNixExpression = fn: m:
+    { overlays ? [ ] }:
     let
       exprs = (lib.makeExtensible (self: {
         buildNodeModule = fn;
         # make it overridable for `curlOpts`
         fetchurl = lib.makeOverridable fetchurl;
       })).extend (import m);
-    in
-    builtins.foldl' (acc: curr: acc.extend curr) exprs overlays;
+    in builtins.foldl' (acc: curr: acc.extend curr) exprs overlays;
 
   # Creates a derivation that contains a Nix expression for the given yarn.lock file.
   #
@@ -448,10 +426,7 @@ let
   # of the arguments will be passed through to the linkNodeModules function.
   #
   makeNodeModules = package:
-    { tree
-    , sections ? [ "dependencies" "devDependencies" ]
-    , ...
-    }@args:
+    { tree, sections ? [ "dependencies" "devDependencies" ], ... }@args:
     let modules = selectModules package { inherit tree sections; };
     in linkNodeModules ({
       modules = modules;
@@ -464,11 +439,12 @@ let
     { tree, sections }:
     let
       parsed = lib.importJSON package;
-      deps = builtins.foldl' (acc: curr: if lib.hasAttr curr parsed then (acc // parsed.${curr}) else acc) { } sections;
+      deps = builtins.foldl' (acc: curr:
+        if lib.hasAttr curr parsed then (acc // parsed.${curr}) else acc) { }
+        sections;
       withVersions = builtins.attrValues
         (builtins.mapAttrs (name: version: "${name}@${version}") deps);
-    in
-    builtins.map (n: tree.${n}) withVersions;
+    in builtins.map (n: tree.${n}) withVersions;
 
   # The js2nix package derivation that provides a binary `js2nix` that can be used to generate
   # a Nix expression, based on given `package.json` & `yarn.lock` files.
@@ -477,7 +453,8 @@ let
     inherit yarn nix parseModuleID selectModules;
     # avoid re-building js2nix with operational node-gyp, because it doesn't depend on it anyway
     buildNodeModule = createBuildNodeModule [
-      (stub-node-gyp "Unable to build js2nix dependency with node-gyp. It should not depend on any native code in the first place.")
+      (stub-node-gyp
+        "Unable to build js2nix dependency with node-gyp. It should not depend on any native code in the first place.")
     ];
     loadNixExpression = createLoadNixExpression buildNodeModule;
   };
@@ -489,17 +466,12 @@ let
       c = builtins.readFile f;
       s = lib.splitString "\n" c;
       nc = builtins.filter
-        (s: let f = (builtins.substring 0 1 s); in f != "#" && f != "")
-        s;
-    in
-    builtins.foldl'
-      (acc: curr:
-        let s = lib.splitString "=" curr;
-        in acc // {
-          "${builtins.head s}" = builtins.concatStringsSep "=" (builtins.tail s);
-        })
-      { }
-      nc;
+        (s: let f = (builtins.substring 0 1 s); in f != "#" && f != "") s;
+    in builtins.foldl' (acc: curr:
+      let s = lib.splitString "=" curr;
+      in acc // {
+        "${builtins.head s}" = builtins.concatStringsSep "=" (builtins.tail s);
+      }) { } nc;
 
   # Parses an id from the given package name. For example:
   #
@@ -545,14 +517,10 @@ let
   # Returns an attr set with all the potentially usefull resources, related to the
   # `package.json` and `yarn.lock` files' tuple. The main API.
   #
-  buildEnv =
-    { package-json
-    , yarn-lock ? null
-    , yarn-lock-nix ? (makeNixExpression yarn-lock)
-    , overlays ? [ ]
-    }@args:
-    assert lib.hasAttr "yarn-lock" args -> ! lib.hasAttr "yarn-lock-nix" args;
-    assert lib.hasAttr "yarn-lock-nix" args -> ! lib.hasAttr "yarn-lock" args;
+  buildEnv = { package-json, yarn-lock ? null
+    , yarn-lock-nix ? (makeNixExpression yarn-lock), overlays ? [ ] }@args:
+    assert lib.hasAttr "yarn-lock" args -> !lib.hasAttr "yarn-lock-nix" args;
+    assert lib.hasAttr "yarn-lock-nix" args -> !lib.hasAttr "yarn-lock" args;
 
     let
       pkgs = loadNixExpression yarn-lock-nix {
@@ -562,34 +530,23 @@ let
         tree = pkgs;
         exposeBin = true;
       }) // {
-        prod = makeNodeModules package-json
-          {
-            tree = pkgs;
-            sections = [ "dependencies" ];
-          };
+        prod = makeNodeModules package-json {
+          tree = pkgs;
+          sections = [ "dependencies" ];
+        };
       };
-    in
-    {
-      inherit nodeModules pkgs;
-    };
-in
-{
+    in { inherit nodeModules pkgs; };
+in {
   # Main API
   __functor = self: buildEnv;
   inherit buildEnv;
 
   inherit
-    # Exported executables
-    bin
-    proxy
-    node-gyp
+  # Exported executables
+    bin proxy node-gyp
 
     # Granular API exposure
-    load
-    loadNixExpression
-    makeNodeModules
-    makeOverlay
-    selectModules
+    load loadNixExpression makeNodeModules makeOverlay selectModules
 
     # Helpers
     fromNPMRC;
